@@ -1,0 +1,10 @@
+[package]
+name = "connect4"
+version = "0.1.0"
+authors = ["Vincent Junge <vincentjunge@posteo.net>"]
+edition = "2018"
+
+[dependencies]
+smallvec = "1"
+oorandom = "11"
+getrandom = "0.2"
