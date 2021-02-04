@@ -1,5 +1,9 @@
-use std::ops::{Index, IndexMut};
+use std::{
+    ops::{Index, IndexMut},
+    time::Instant,
+};
 
+use rayon::iter::{IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
 use smallvec::{smallvec, SmallVec};
 
 const COLUMNS: u8 = 7;
@@ -207,40 +211,56 @@ enum Eval {
 
 type NextMove = SmallVec<[u8; COLUMNS as usize]>;
 
-fn find_next_move(state: &State, depth: u8) -> (NextMove, Eval) {
-    let mut moves: SmallVec<[(u8, Eval); COLUMNS as usize]> = SmallVec::new();
+fn find_next_move(state: &State, depth: u8, parallelize: bool) -> (NextMove, Eval) {
+    let mut move_states: SmallVec<[(u8, State); COLUMNS as usize]> = SmallVec::new();
     for column in 0..7 {
         match state.try_move(column) {
             MoveResult::Victory => return (smallvec![column], Eval::ImmediateVictory),
             MoveResult::Impossible => (),
-            MoveResult::State(next) => {
-                let assured_loss = if depth > 0 {
-                    find_next_move(&next, depth - 1).1
-                } else {
-                    Eval::Neutral
-                };
-                moves.push((column, assured_loss))
-            }
+            MoveResult::State(next) => move_states.push((column, next)),
         }
     }
 
-    let eval = if moves
+    let mut moves_evals: SmallVec<[_; COLUMNS as usize]> =
+        smallvec![(255, Eval::Neutral); move_states.len()];
+    let eval = |((column, state), res): (&mut (u8, State), &mut (u8, Eval))| {
+        let eval = if depth > 0 {
+            find_next_move(state, depth - 1, false).1
+        } else {
+            Eval::Neutral
+        };
+        *res = (*column, eval);
+    };
+    if parallelize {
+        move_states
+            .par_iter_mut()
+            .zip(moves_evals.par_iter_mut())
+            .for_each(eval);
+    } else {
+        move_states
+            .iter_mut()
+            .zip(moves_evals.iter_mut())
+            .for_each(eval);
+    }
+
+    let eval = if moves_evals
         .iter()
         .all(|(_, sit)| matches!(sit, Eval::ImmediateVictory | Eval::AssuredVictory))
     {
         Eval::AssuredLoss
-    } else if moves
+    } else if moves_evals
         .iter()
         .any(|(_, sit)| matches!(sit, Eval::AssuredLoss))
     {
-        moves.retain(|(_, sit)| matches!(sit, Eval::AssuredLoss));
+        moves_evals.retain(|(_, sit)| matches!(sit, Eval::AssuredLoss));
         Eval::AssuredVictory
     } else {
         // Todo: rate, prefer moves where opponent takes longer to win
-        moves.retain(|(_, sit)| !matches!(sit, Eval::ImmediateVictory | Eval::AssuredVictory));
+        moves_evals
+            .retain(|(_, sit)| !matches!(sit, Eval::ImmediateVictory | Eval::AssuredVictory));
         Eval::Neutral
     };
-    let next_moves = moves.iter().map(|(column, ..)| *column).collect();
+    let next_moves = moves_evals.iter().map(|(column, ..)| *column).collect();
     (next_moves, eval)
 }
 
@@ -250,6 +270,7 @@ fn main() {
         getrandom::getrandom(&mut buf).unwrap();
         u64::from_be_bytes(buf)
     };
+    let seed = 1;
     let mut rng = oorandom::Rand32::new(seed);
     let mut pick = |possible: NextMove| {
         if possible.len() > 0 {
@@ -258,11 +279,13 @@ fn main() {
             None
         }
     };
+
     println!("Seed: {}", seed);
+    let time_start = Instant::now();
 
     let mut state = State(Default::default(), Player::O);
     loop {
-        let (next_move, eval) = find_next_move(&state, 8);
+        let (next_move, eval) = find_next_move(&state, 8, true);
         if let Some(column) = pick(next_move) {
             println!(
                 "Player {:?} plays column {} (eval: {:?})",
@@ -270,19 +293,22 @@ fn main() {
             );
             if let Eval::ImmediateVictory = eval {
                 println!("Victory!");
-                return;
+                break;
             } else {
                 state = match state.try_move(column) {
                     MoveResult::State(next) => next,
-                    _ => panic!(),
+                    _ => unreachable!(),
                 };
                 println!("{:?}", state)
             }
         } else {
             println!("Draw!");
-            return;
+            break;
         }
     }
+
+    let time_end = Instant::now();
+    println!("Time: {}", (time_end - time_start).as_secs_f32());
 }
 
 #[rustfmt::skip]
